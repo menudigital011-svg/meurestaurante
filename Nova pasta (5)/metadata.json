@@ -1,5 +1,6 @@
 {
   "name": "Menu Digital Inteligente",
   "description": "Sistema SaaS de menu digital para restaurantes com design premium, gestão administrativa e IA para geração de imagens.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
