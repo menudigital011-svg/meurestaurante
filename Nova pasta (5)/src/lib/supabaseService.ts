@@ -1,89 +1,40 @@
-import { supabase, isSupabaseHealthy, updateSupabaseCache } from './supabase';
-import { getLocalData, setLocalData } from './statusUtils';
-import { Restaurant, Category, Product, Order, RestaurantTable, OrderItem } from '../types';
+import { supabase, isSupabaseHealthy } from './supabase';
+import { Restaurant, Category, Product, Order, RestaurantTable, BusinessHours, PaymentMethod } from '../types';
+import { MOCK_RESTAURANT, MOCK_CATEGORIES, MOCK_PRODUCTS } from './mockDb';
 
 const DEFAULT_RESTAURANT_ID = 'default';
 
-// Cache global em memória para aceleração SWR (0ms ao alternar de abas)
+// Cache em memória global para aceleração de performance de carregamento secundário (SWR)
 const memoryCache: Record<string, any> = {};
 
-// Helper para mapear os dados do DB para tipagem do App
+// Helper para mapear registro do banco de dados para o tipo Restaurant
 export interface MenuVisit {
   id: string;
   restaurant_id: string;
-  table_number: string;
-  visited_at: string;
+  table_number?: string;
+  user_agent?: string;
+  referrer?: string;
+  created_at: string;
 }
 
-const MOCK_RESTAURANT: Restaurant = {
-  id: 'default',
-  name: 'Talatona Grill House',
-  slug: 'talatona-grill',
-  theme_color: '#ea580c',
-  logo_url: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=200&auto=format&fit=crop&q=60&ixlib=rb-4.0.3',
-  cover_url: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=1200&auto=format&fit=crop&q=60&ixlib=rb-4.0.3',
-  phone: '+244 923 000 000',
-  address: 'Via AL14, Talatona, Luanda',
-  instagram: 'talatonagrill',
-  facebook: 'talatonagrill',
-  delivery_tax: 1500,
-  min_order_value: 3000,
-  is_active: true,
-  payment_methods: ['cash', 'card', 'transfer']
+const getLocalData = (key: string, fallback: any) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
 };
 
-const MOCK_CATEGORIES: Category[] = [
-  { id: 'cat1', name: 'Grelhados na Brasa', order: 1 },
-  { id: 'cat2', name: 'Acompanhados', order: 2 },
-  { id: 'cat3', name: 'Bebidas Tropicais', order: 3 },
-];
-
-const MOCK_PRODUCTS: Product[] = [
-  {
-    id: 'p1',
-    name: 'Picanha Premium Familiar',
-    description: 'Generosa porção de picanha grelhada na brasa, acompanhada por arroz de feijão, farofa, batata frita e molho vinagrete artesanal.',
-    price: 12500,
-    image: 'https://images.unsplash.com/photo-1544025162-d76694265947?w=600&auto=format&fit=crop&q=80',
-    categoryId: 'cat1',
-    isFeatured: true,
-    isPromotion: false,
-    restaurantId: 'default'
-  },
-  {
-    id: 'p2',
-    name: 'Misto de Carnes Especial',
-    description: 'Churrasco misto com as melhores carnes grelhadas: costeleta, salsicha toscana, peito de frango e bifinhos de lombo suculentos.',
-    price: 14000,
-    image: 'https://images.unsplash.com/photo-1555939594-58d7cb561ad1?w=600&auto=format&fit=crop&q=80',
-    categoryId: 'cat1',
-    isFeatured: false,
-    isPromotion: true,
-    restaurantId: 'default'
-  },
-  {
-    id: 'p3',
-    name: 'Batata Frita Rústica',
-    description: 'Batatas naturais bem estaladiças por fora e macias por dentro, salpicadas com ervas finas e o nosso tempero especial da casa.',
-    price: 2500,
-    image: 'https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=600&auto=format&fit=crop&q=80',
-    categoryId: 'cat2',
-    isFeatured: false,
-    isPromotion: false,
-    restaurantId: 'default'
-  },
-  {
-    id: 'p4',
-    name: 'Arroz de Feijão Tradicional',
-    description: 'Arroz soltinho cozinhado num delicioso caldo rústico de feijão preto com especiarias e chouriço seco.',
-    price: 2000,
-    image: 'https://images.unsplash.com/photo-1536304997881-a372c179924b?w=600&auto=format&fit=crop&q=80',
-    categoryId: 'cat2',
-    isFeatured: false,
-    isPromotion: false,
-    restaurantId: 'default'
+const setLocalData = (key: string, val: any) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+    // Dispara evento local para atualização reativa offline
+    window.dispatchEvent(new CustomEvent('local_db_change', { detail: { key } }));
+  } catch (error) {
+    console.error('Erro ao salvar localmente:', error);
   }
-];
+};
 
 const triggerLocalUpdate = (channelName: string) => {
   window.dispatchEvent(new CustomEvent('local_db_change', { detail: { channel: channelName } }));
@@ -100,125 +51,125 @@ const subscribeLocal = (channelName: string, onUpdate: () => void) => {
 };
 
 export const supabaseService = {
-  // --- SEGMENTO DE RESTAURANTES ---
-  async getRestaurants() {
-    try {
-      if (!isSupabaseHealthy) {
-        return [getLocalData('local_restaurant_default', MOCK_RESTAURANT)];
-      }
-      const { data, error } = await supabase
-        .from('restaurants')
-        .select('*');
-      if (error) throw error;
-      return data || [];
-    } catch {
-      return [getLocalData('local_restaurant_default', MOCK_RESTAURANT)];
-    }
-  },
-
-  async getRestaurantBySlug(slug: string): Promise<Restaurant | null> {
-    try {
-      if (!isSupabaseHealthy) {
-        const cached = getLocalData('local_restaurant_default', MOCK_RESTAURANT);
-        return cached.slug === slug ? cached : null;
-      }
-      const { data, error } = await supabase
-        .from('restaurants')
-        .select('*')
-        .eq('slug', slug)
-        .maybeSingle();
-
-      if (error) throw error;
-      if (!data) return null;
-
-      return {
-        id: data.id,
-        name: data.name,
-        slug: data.slug,
-        theme_color: data.theme_color || '#ea580c',
-        logo_url: data.logo_url || '',
-        cover_url: data.cover_url || '',
-        phone: data.phone || '',
-        address: data.address || '',
-        instagram: data.instagram || '',
-        facebook: data.facebook || '',
-        delivery_tax: data.delivery_tax || 0,
-        min_order_value: data.min_order_value || 0,
-        is_active: data.is_active ?? true,
-        payment_methods: data.payment_methods || ['cash', 'card', 'transfer']
-      };
-    } catch (e) {
-      console.warn('Erro ao obter restaurante por slug, buscando local:', e);
-      const cached = getLocalData('local_restaurant_default', MOCK_RESTAURANT);
-      return cached.slug === slug ? cached : null;
-    }
-  },
-
-  async getRestaurantById(id: string): Promise<Restaurant | null> {
+  // RESTAURANTS
+  async getRestaurant(id: string): Promise<Restaurant | null> {
     const dbId = id === 'default' ? DEFAULT_RESTAURANT_ID : id;
+    let actualId = dbId;
+    
+    // Tenta obter por slug primeiro se não for uuid padrão
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dbId);
+    
     try {
       if (!isSupabaseHealthy) {
         return getLocalData(`local_restaurant_${dbId}`, MOCK_RESTAURANT);
       }
-      const { data, error } = await supabase
-        .from('restaurants')
-        .select('*')
-        .eq('id', dbId)
-        .maybeSingle();
+
+      let query = supabase.from('restaurants').select('*');
+      
+      if (isUUID) {
+        query = query.or(`id.eq.${dbId},owner_uid.eq.${dbId}`);
+      } else {
+        query = query.eq('slug', dbId);
+      }
+
+      const { data, error } = await query.maybeSingle();
 
       if (error) throw error;
       if (!data) return null;
 
-      return {
+      const mapped: Restaurant = {
         id: data.id,
         name: data.name,
-        slug: data.slug,
-        theme_color: data.theme_color || '#ea580c',
-        logo_url: data.logo_url || '',
-        cover_url: data.cover_url || '',
+        slug: data.slug || data.id,
+        description: data.description || '',
+        logoUrl: data.logo_url || '',
+        coverUrl: data.cover_url || '',
         phone: data.phone || '',
         address: data.address || '',
-        instagram: data.instagram || '',
-        facebook: data.facebook || '',
-        delivery_tax: data.delivery_tax || 0,
-        min_order_value: data.min_order_value || 0,
-        is_active: data.is_active ?? true,
-        payment_methods: data.payment_methods || ['cash', 'card', 'transfer']
+        primaryColor: data.primary_color || '#ea580c',
+        accentColor: data.accent_color || '#ffedd5',
+        instagramUrl: data.instagram_url || '',
+        facebookUrl: data.facebook_url || '',
+        ownerUid: data.owner_uid || '',
+        deliveryFee: Number(data.delivery_fee ?? 0),
+        minDeliveryTime: data.min_delivery_time || 30,
+        maxDeliveryTime: data.max_delivery_time || 45,
+        isActive: data.is_active ?? true,
+        businessHours: (data.business_hours as unknown as BusinessHours) || {
+          monday: { open: '08:00', close: '22:00', closed: false },
+          tuesday: { open: '08:00', close: '22:00', closed: false },
+          wednesday: { open: '08:00', close: '22:00', closed: false },
+          thursday: { open: '08:00', close: '22:00', closed: false },
+          friday: { open: '08:00', close: '22:00', closed: false },
+          saturday: { open: '08:00', close: '22:00', closed: false },
+          sunday: { open: '08:00', close: '22:00', closed: false }
+        },
+        paymentMethods: (data.payment_methods as unknown as PaymentMethod[]) || [
+          { id: 'cash', name: 'Dinheiro', type: 'cash', enabled: true },
+          { id: 'card', name: 'Cartão de Crédito/Débito', type: 'card', enabled: true }
+        ]
       };
-    } catch (e) {
-      console.warn('Erro ao obter restaurante por id, buscando local:', e);
+
+      setLocalData(`local_restaurant_${mapped.id}`, mapped);
+      if (mapped.slug) {
+        setLocalData(`local_restaurant_${mapped.slug}`, mapped);
+      }
+      return mapped;
+    } catch (err) {
+      console.warn('Erro ao carregar restaurante do Supabase, usando local:', err);
       return getLocalData(`local_restaurant_${dbId}`, MOCK_RESTAURANT);
     }
   },
 
-  async saveRestaurant(restaurant: Restaurant) {
-    const dbId = restaurant.id === 'default' ? DEFAULT_RESTAURANT_ID : restaurant.id;
-    setLocalData(`local_restaurant_${dbId}`, restaurant);
-    triggerLocalUpdate(`rt-restaurant-${dbId}`);
+  async updateRestaurant(id: string, updates: Partial<Restaurant>): Promise<void> {
+    const dbId = id === 'default' ? DEFAULT_RESTAURANT_ID : id;
+    let actualId = dbId;
+
+    // Atualização local imediata para sensação instantânea
+    const localKey = `local_restaurant_${dbId}`;
+    const current = getLocalData(localKey, MOCK_RESTAURANT);
+    const updated = { ...current, ...updates };
+    setLocalData(localKey, updated);
+    
+    // Atualiza cache em memória
+    memoryCache[`restaurant_${actualId}`] = updated;
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-restaurant-${dbId}`);
+      return;
+    }
 
     try {
-      if (!isSupabaseHealthy) return;
+      // Descobrir ID real caso seja um slug
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dbId);
+      if (!isUUID) {
+        const { data } = await supabase.from('restaurants').select('id').eq('slug', dbId).maybeSingle();
+        if (data) actualId = data.id;
+      }
 
-      const payload = {
-        name: restaurant.name,
-        slug: restaurant.slug,
-        theme_color: restaurant.theme_color,
-        logo_url: restaurant.logo_url,
-        cover_url: restaurant.cover_url,
-        phone: restaurant.phone,
-        address: restaurant.address,
-        instagram: restaurant.instagram,
-        facebook: restaurant.facebook,
-        delivery_tax: restaurant.delivery_tax,
-        min_order_value: restaurant.min_order_value,
-        is_active: restaurant.is_active,
-        payment_methods: restaurant.payment_methods
-      };
+      const dbUpdates: any = {};
+      if (updates.name !== undefined) dbUpdates.name = updates.name;
+      if (updates.slug !== undefined) dbUpdates.slug = updates.slug;
+      if (updates.description !== undefined) dbUpdates.description = updates.description;
+      if (updates.logoUrl !== undefined) dbUpdates.logo_url = updates.logoUrl;
+      if (updates.coverUrl !== undefined) dbUpdates.cover_url = updates.coverUrl;
+      if (updates.phone !== undefined) dbUpdates.phone = updates.phone;
+      if (updates.address !== undefined) dbUpdates.address = updates.address;
+      if (updates.primaryColor !== undefined) dbUpdates.primary_color = updates.primaryColor;
+      if (updates.accentColor !== undefined) dbUpdates.accent_color = updates.accentColor;
+      if (updates.instagramUrl !== undefined) dbUpdates.instagram_url = updates.instagramUrl;
+      if (updates.facebookUrl !== undefined) dbUpdates.facebook_url = updates.facebookUrl;
+      if (updates.deliveryFee !== undefined) dbUpdates.delivery_fee = updates.deliveryFee;
+      if (updates.minDeliveryTime !== undefined) dbUpdates.min_delivery_time = updates.minDeliveryTime;
+      if (updates.maxDeliveryTime !== undefined) dbUpdates.max_delivery_time = updates.maxDeliveryTime;
+      if (updates.isActive !== undefined) dbUpdates.is_active = updates.isActive;
+      if (updates.businessHours !== undefined) dbUpdates.business_hours = updates.businessHours;
+      if (updates.paymentMethods !== undefined) dbUpdates.payment_methods = updates.paymentMethods;
 
       const { error } = await supabase
         .from('restaurants')
-        .update(payload)
-        .eq('id', dbId);
+        .update(dbUpdates)
+        .eq('id', actualId);
 
       if (error) throw error;
     } catch (error: any) {
@@ -237,10 +188,9 @@ export const supabaseService = {
     }
     
     const fetch = async () => {
-      console.log('🔄 Sincronizando dados do restaurante...', actualId);
       try {
-        const data = await this.getRestaurantById(actualId);
-        if (data && data.id !== actualId) {
+        const data = await this.getRestaurant(actualId);
+        if (data) {
           actualId = data.id;
           setupSubscription();
         }
@@ -267,17 +217,14 @@ export const supabaseService = {
       }
 
       try {
-        if (channel) supabase.removeChannel(channel);
-
         channel = supabase
-          .channel(`public:restaurants:id=eq.${actualId}`)
+          .channel(`restaurant-changes-${actualId}`)
           .on('postgres_changes', {
             event: 'UPDATE',
             schema: 'public',
             table: 'restaurants',
             filter: `id=eq.${actualId}`
           }, (payload) => {
-            console.log('⚡ Mudança detectada no Restaurante (Realtime):', payload.eventType);
             fetch();
           })
           .subscribe();
@@ -287,7 +234,6 @@ export const supabaseService = {
     };
 
     fetch();
-    setupSubscription();
 
     return () => {
       if (channel) {
@@ -298,13 +244,12 @@ export const supabaseService = {
     };
   },
 
-  // --- SEGMENTO DE CATEGORIAS ---
+  // CATEGORIES
   async getCategories(restaurantId: string): Promise<Category[]> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
     try {
       if (!isSupabaseHealthy) {
-        const cached = getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES);
-        return cached.sort((a: any, b: any) => (a.order || 0) - (b.order || 0));
+        return getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES);
       }
 
       const { data, error } = await supabase
@@ -314,92 +259,103 @@ export const supabaseService = {
         .order('order', { ascending: true });
 
       if (error) throw error;
-      return (data || []).map(cat => ({
-        id: cat.id,
-        name: cat.name,
-        order: cat.order
+      const categories = (data || []).map(c => ({
+        id: c.id,
+        name: c.name,
+        order: c.order || 0
       }));
-    } catch (e) {
-      console.warn('Erro ao carregar categorias, retornando mock/local:', e);
-      const cached = getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES);
-      return cached.sort((a: any, b: any) => (a.order || 0) - (b.order || 0));
+
+      setLocalData(`local_categories_${dbId}`, categories);
+      return categories;
+    } catch {
+      return getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES);
     }
   },
 
-  async addCategory(restaurantId: string, name: string, orderValue: number): Promise<Category> {
+  async addCategory(restaurantId: string, category: Omit<Category, 'id'>): Promise<Category> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const tempId = `cat_${Date.now()}`;
-    const newCat: Category = { id: tempId, name, order: orderValue };
+    const newId = crypto.randomUUID();
+    const newCategory: Category = { ...category, id: newId };
 
-    const currentCached = getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES);
-    setLocalData(`local_categories_${dbId}`, [...currentCached, newCat]);
-    triggerLocalUpdate(`rt-categories-${dbId}`);
+    const localKey = `local_categories_${dbId}`;
+    const current = getLocalData(localKey, MOCK_CATEGORIES);
+    setLocalData(localKey, [...current, newCategory].sort((a, b) => (a.order || 0) - (b.order || 0)));
+    
+    // Invalidar cache em memória
+    delete memoryCache[`categories_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-categories-${dbId}`);
+      return newCategory;
+    }
 
     try {
-      if (!isSupabaseHealthy) return newCat;
-
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('categories')
         .insert([{
+          id: newId,
           restaurant_id: dbId,
-          name: name,
-          order: orderValue
-        }])
-        .select()
-        .single();
+          name: category.name,
+          order: category.order || 0
+        }]);
 
       if (error) throw error;
-      
-      const saved: Category = { id: data.id, name: data.name, order: data.order };
-      const nonTemp = getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES).filter((c: any) => c.id !== tempId);
-      setLocalData(`local_categories_${dbId}`, [...nonTemp, saved]);
-      triggerLocalUpdate(`rt-categories-${dbId}`);
-      return saved;
     } catch (e) {
-      console.error('Inserido apenas localmente por erro ao adicionar categoria:', e);
-      return newCat;
+      console.error('Adicionado apenas localmente devido a indisponibilidade do banco:', e);
     }
+
+    return newCategory;
   },
 
-  async updateCategory(restaurantId: string, category: Category) {
+  async updateCategory(restaurantId: string, categoryId: string, updates: Partial<Category>): Promise<void> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES);
-    const updated = currentCached.map((c: any) => c.id === category.id ? category : c);
-    setLocalData(`local_categories_${dbId}`, updated);
-    triggerLocalUpdate(`rt-categories-${dbId}`);
+    const localKey = `local_categories_${dbId}`;
+    const current = getLocalData(localKey, MOCK_CATEGORIES);
+    const updated = current.map((c: any) => c.id === categoryId ? { ...c, ...updates } : c);
+    setLocalData(localKey, updated.sort((a: any, b: any) => (a.order || 0) - (b.order || 0)));
+
+    // Invalidar cache em memória
+    delete memoryCache[`categories_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-categories-${dbId}`);
+      return;
+    }
 
     try {
-      if (!isSupabaseHealthy) return;
-
       const { error } = await supabase
         .from('categories')
         .update({
-          name: category.name,
-          order: category.order
+          name: updates.name,
+          order: updates.order
         })
-        .eq('id', category.id)
-        .eq('restaurant_id', dbId);
+        .eq('id', categoryId);
 
       if (error) throw error;
     } catch (e) {
-      console.error('Erro ao editar categoria no Supabase:', e);
+      console.error('Atualizado apenas local devido a erro no Supabase:', e);
     }
   },
 
   async deleteCategory(restaurantId: string, categoryId: string) {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_categories_${dbId}`, MOCK_CATEGORIES);
-    setLocalData(`local_categories_${dbId}`, currentCached.filter((c: any) => c.id !== categoryId));
-    triggerLocalUpdate(`rt-categories-${dbId}`);
+    const localKey = `local_categories_${dbId}`;
+    const current = getLocalData(localKey, MOCK_CATEGORIES);
+    setLocalData(localKey, current.filter((c: any) => c.id !== categoryId));
+
+    // Invalidar cache em memória
+    delete memoryCache[`categories_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-categories-${dbId}`);
+      return 1;
+    }
 
     try {
-      if (!isSupabaseHealthy) return 1;
-
       const { error } = await supabase
         .from('categories')
         .delete({ count: 'exact' })
-        .eq('id', categoryId)
-        .eq('restaurant_id', dbId);
+        .eq('id', categoryId);
 
       if (error) throw error;
       return 1;
@@ -465,14 +421,13 @@ export const supabaseService = {
 
     try {
       channel = supabase
-        .channel(`public:categories:restaurant_id=eq.${dbId}`)
+        .channel(`categories-changes-${dbId}`)
         .on('postgres_changes', {
           event: '*',
           schema: 'public',
           table: 'categories',
           filter: `restaurant_id=eq.${dbId}`
         }, (payload) => {
-          console.log('⚡ Mudança detectada em Categorias (Realtime):', payload.eventType);
           fetch();
         })
         .subscribe();
@@ -489,7 +444,7 @@ export const supabaseService = {
     };
   },
 
-  // --- SEGMENTO DE PRODUTOS ---
+  // PRODUCTS
   async getProducts(restaurantId: string): Promise<Product[]> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
     try {
@@ -503,118 +458,121 @@ export const supabaseService = {
         .eq('restaurant_id', dbId);
 
       if (error) throw error;
-      return (data || []).map(p => ({
+      const products = (data || []).map(p => ({
         id: p.id,
         name: p.name,
         description: p.description || '',
-        price: p.price,
-        image: p.image || '',
+        price: Number(p.price),
+        image: p.image_url || '',
+        available: p.available ?? true,
         categoryId: p.category_id,
         isPromotion: p.is_promotion ?? false,
-        isFeatured: p.is_featured ?? false,
-        restaurantId: dbId
+        isFeatured: p.is_featured ?? false
       }));
-    } catch (e) {
-      console.warn('Erro ao carregar produtos, usando mock local:', e);
+
+      setLocalData(`local_products_${dbId}`, products);
+      return products;
+    } catch {
       return getLocalData(`local_products_${dbId}`, MOCK_PRODUCTS);
     }
   },
 
   async addProduct(restaurantId: string, product: Omit<Product, 'id'>): Promise<Product> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const tempId = `p_${Date.now()}`;
-    const newProd: Product = { ...product, id: tempId, restaurantId: dbId };
+    const newId = crypto.randomUUID();
+    const newProduct: Product = { ...product, id: newId };
 
-    const currentCached = getLocalData(`local_products_${dbId}`, MOCK_PRODUCTS);
-    setLocalData(`local_products_${dbId}`, [...currentCached, newProd]);
-    triggerLocalUpdate(`rt-products-${dbId}`);
+    const localKey = `local_products_${dbId}`;
+    const current = getLocalData(localKey, MOCK_PRODUCTS);
+    setLocalData(localKey, [...current, newProduct]);
+
+    // Invalidar cache em memória
+    delete memoryCache[`products_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-products-${dbId}`);
+      return newProduct;
+    }
 
     try {
-      if (!isSupabaseHealthy) return newProd;
-
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('products')
         .insert([{
+          id: newId,
           restaurant_id: dbId,
           name: product.name,
           description: product.description,
           price: product.price,
-          image: product.image,
+          image_url: product.image,
+          available: product.available,
           category_id: product.categoryId,
           is_promotion: product.isPromotion,
           is_featured: product.isFeatured
-        }])
-        .select()
-        .single();
+        }]);
 
       if (error) throw error;
-
-      const saved: Product = {
-        id: data.id,
-        name: data.name,
-        description: data.description || '',
-        price: data.price,
-        image: data.image || '',
-        categoryId: data.category_id,
-        isPromotion: data.is_promotion ?? false,
-        isFeatured: data.is_featured ?? false,
-        restaurantId: dbId
-      };
-
-      const nonTemp = getLocalData(`local_products_${dbId}`, MOCK_PRODUCTS).filter((p: any) => p.id !== tempId);
-      setLocalData(`local_products_${dbId}`, [...nonTemp, saved]);
-      triggerLocalUpdate(`rt-products-${dbId}`);
-      return saved;
     } catch (e) {
-      console.error('Produto adicionado apenas localmente:', e);
-      return newProd;
+      console.error('Produto adicionado apenas local devido a falha de conexão:', e);
     }
+
+    return newProduct;
   },
 
-  async updateProduct(restaurantId: string, product: Product) {
+  async updateProduct(restaurantId: string, productId: string, updates: Partial<Product>): Promise<void> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_products_${dbId}`, MOCK_PRODUCTS);
-    const updated = currentCached.map((p: any) => p.id === product.id ? product : p);
-    setLocalData(`local_products_${dbId}`, updated);
-    triggerLocalUpdate(`rt-products-${dbId}`);
+    const localKey = `local_products_${dbId}`;
+    const current = getLocalData(localKey, MOCK_PRODUCTS);
+    setLocalData(localKey, current.map((p: any) => p.id === productId ? { ...p, ...updates } : p));
+
+    // Invalidar cache em memória
+    delete memoryCache[`products_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-products-${dbId}`);
+      return;
+    }
 
     try {
-      if (!isSupabaseHealthy) return;
+      const dbUpdates: any = {};
+      if (updates.name !== undefined) dbUpdates.name = updates.name;
+      if (updates.description !== undefined) dbUpdates.description = updates.description;
+      if (updates.price !== undefined) dbUpdates.price = updates.price;
+      if (updates.image !== undefined) dbUpdates.image_url = updates.image;
+      if (updates.available !== undefined) dbUpdates.available = updates.available;
+      if (updates.categoryId !== undefined) dbUpdates.category_id = updates.categoryId;
+      if (updates.isPromotion !== undefined) dbUpdates.is_promotion = updates.isPromotion;
+      if (updates.isFeatured !== undefined) dbUpdates.is_featured = updates.isFeatured;
 
       const { error } = await supabase
         .from('products')
-        .update({
-          name: product.name,
-          description: product.description,
-          price: product.price,
-          image: product.image,
-          category_id: product.categoryId,
-          is_promotion: product.isPromotion,
-          is_featured: product.isFeatured
-        })
-        .eq('id', product.id)
-        .eq('restaurant_id', dbId);
+        .update(dbUpdates)
+        .eq('id', productId);
 
       if (error) throw error;
     } catch (e) {
-      console.error('Erro ao editar produto no Supabase:', e);
+      console.error('Produto atualizado apenas localmente devido a falha no Supabase:', e);
     }
   },
 
   async deleteProduct(restaurantId: string, productId: string) {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_products_${dbId}`, MOCK_PRODUCTS);
-    setLocalData(`local_products_${dbId}`, currentCached.filter((p: any) => p.id !== productId));
-    triggerLocalUpdate(`rt-products-${dbId}`);
+    const localKey = `local_products_${dbId}`;
+    const current = getLocalData(localKey, MOCK_PRODUCTS);
+    setLocalData(localKey, current.filter((p: any) => p.id !== productId));
+
+    // Invalidar cache em memória
+    delete memoryCache[`products_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-products-${dbId}`);
+      return 1;
+    }
 
     try {
-      if (!isSupabaseHealthy) return 1;
-
       const { error } = await supabase
         .from('products')
         .delete({ count: 'exact' })
-        .eq('id', productId)
-        .eq('restaurant_id', dbId);
+        .eq('id', productId);
 
       if (error) throw error;
       return 1;
@@ -651,7 +609,7 @@ export const supabaseService = {
           .from('products')
           .select('*')
           .eq('restaurant_id', dbId);
-
+        
         if (error) throw error;
         
         if (data) {
@@ -659,8 +617,9 @@ export const supabaseService = {
             id: p.id,
             name: p.name,
             description: p.description || '',
-            price: p.price,
-            image: p.image || '',
+            price: Number(p.price),
+            image: p.image_url || '',
+            available: p.available ?? true,
             categoryId: p.category_id,
             isPromotion: p.is_promotion,
             isFeatured: p.is_featured
@@ -672,7 +631,6 @@ export const supabaseService = {
           callback([]);
         }
       } catch (err) {
-        console.warn('Erro ao assinar carregamento de produtos, usando local:', err);
         const cached = getLocalData(`local_products_${dbId}`, MOCK_PRODUCTS);
         memoryCache[cacheKey] = cached;
         callback(cached);
@@ -691,14 +649,13 @@ export const supabaseService = {
 
     try {
       channel = supabase
-        .channel(`public:products:restaurant_id=eq.${dbId}`)
+        .channel(`products-changes-${dbId}`)
         .on('postgres_changes', {
           event: '*',
           schema: 'public',
           table: 'products',
           filter: `restaurant_id=eq.${dbId}`
         }, (payload) => {
-          console.log('⚡ Mudança detectada em Produtos (Realtime):', payload.eventType);
           fetch();
         })
         .subscribe();
@@ -715,62 +672,55 @@ export const supabaseService = {
     };
   },
 
-  // --- SEGMENTO DE QR CODES E RASTREIO DE ACESSOS ---
-  async handleTableAccess(restaurantId: string, tableNumber: string): Promise<string> {
+  // REGISTRAR ACESSO / VISITA AO CARDÁPIO
+  async registerMenuVisit(restaurantId: string, tableNumber?: string, userAgent?: string, referrer?: string): Promise<void> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    console.log(`👁️ Registando acesso à Mesa ${tableNumber} do Restaurante ${dbId}`);
-    
-    // Guardar rasto na sessão local
-    const historic = getLocalData(`local_visits_${dbId}`, []);
-    const newVisitNum = { id: `visit_${Date.now()}`, tableNumber, visitedAt: new Date().toISOString() };
-    setLocalData(`local_visits_${dbId}`, [newVisitNum, ...historic].slice(0, 50));
+    if (!isSupabaseHealthy) {
+      const visits = getLocalData(`local_visits_${dbId}`, []);
+      setLocalData(`local_visits_${dbId}`, [...visits, { 
+        id: crypto.randomUUID(), 
+        created_at: new Date().toISOString() 
+      }]);
+      return;
+    }
 
     try {
-      if (!isSupabaseHealthy) return '';
-
-      const { data, error } = await supabase
+      await supabase
         .from('menu_visits')
         .insert([{
           restaurant_id: dbId,
-          table_number: tableNumber
-        }])
-        .select()
-        .single();
-
-      if (error) throw error;
-      return data.id;
-    } catch (e) {
-      console.warn('Rastreio registado na memória apenas por offline ou erro:', e);
-      return '';
+          table_number: tableNumber || null,
+          user_agent: userAgent || null,
+          referrer: referrer || null
+        }]);
+    } catch (err) {
+      console.warn('Erro ao registrar visita no banco (salvo localmente):', err);
     }
   },
 
-  async getTableVisits(restaurantId: string): Promise<any[]> {
+  // ESTATÍSTICAS DO DASHBOARD / VISITAS HISTÓRICAS
+  async getMenuVisits(restaurantId: string): Promise<MenuVisit[]> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    try {
-      if (!isSupabaseHealthy) {
-        return getLocalData(`local_visits_${dbId}`, []);
-      }
+    if (!isSupabaseHealthy) {
+      return getLocalData(`local_visits_${dbId}`, []);
+    }
 
+    try {
       const { data, error } = await supabase
         .from('menu_visits')
         .select('*')
         .eq('restaurant_id', dbId)
-        .order('visited_at', { ascending: false })
-        .limit(100);
+        .order('created_at', { ascending: false });
 
       if (error) throw error;
-      return (data || []).map(v => ({
-        id: v.id,
-        tableNumber: v.table_number,
-        visitedAt: v.visited_at
-      }));
+      setLocalData(`local_visits_${dbId}`, data || []);
+      return data || [];
     } catch (err) {
       return getLocalData(`local_visits_${dbId}`, []);
     }
   },
 
-  // --- SEGMENTO DE PEDIDOS ---
+  // ORDERS
   subscribeOrders(restaurantId: string, callback: (orders: Order[]) => void) {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
     let localOrders: Order[] = [];
@@ -784,25 +734,19 @@ export const supabaseService = {
     const mapOrder = (o: any): Order => ({
       id: o.id,
       customerName: o.customer_name || 'Cliente',
-      tableNumber: o.table_number || '',
-      items: (o.items || []).map((item: any) => ({
-        id: item.id || Math.random().toString(),
-        productId: item.productId,
-        name: item.name,
-        price: item.price,
-        quantity: item.quantity,
-        notes: item.notes
-      })),
-      total: o.total || 0,
-      status: o.status || 'pending',
-      paymentMethod: o.payment_method || 'cash',
-      createdAt: o.created_at,
-      paymentStatus: o.payment_status || 'pending',
-      notes: o.notes || '',
+      customerPhone: o.customer_phone || '',
+      items: typeof o.items === 'string' ? JSON.parse(o.items) : (o.items || []),
+      total: Number(o.total),
       type: o.type || 'table',
-      phone: o.phone || '',
-      address: o.address || ''
+      status: o.status || 'pending',
+      tableNumber: o.table_number,
+      address: o.address,
+      paymentMethod: o.payment_method,
+      createdAt: o.created_at,
+      changeFor: o.change_for ? Number(o.change_for) : undefined
     });
+
+    let subscription: any = null;
 
     const fetch = async () => {
       if (!dbId || dbId === 'undefined') {
@@ -822,7 +766,8 @@ export const supabaseService = {
           .from('orders')
           .select('*')
           .eq('restaurant_id', dbId)
-          .order('created_at', { ascending: false });
+          .order('created_at', { ascending: false })
+          .limit(200);
 
         if (error) throw error;
         
@@ -835,7 +780,6 @@ export const supabaseService = {
           callback([]);
         }
       } catch (err) {
-        console.warn('Erro ao assinar canal de pedidos, usando local:', err);
         const cached = getLocalData(`local_orders_${dbId}`, []);
         memoryCache[cacheKey] = cached;
         callback(cached);
@@ -852,17 +796,15 @@ export const supabaseService = {
       });
     }
 
-    let subscription: any = null;
     try {
       subscription = supabase
-        .channel(`public:orders:restaurant_id=eq.${dbId}`)
+        .channel(`orders-changes-${dbId}`)
         .on('postgres_changes', {
           event: '*',
           schema: 'public',
           table: 'orders',
           filter: `restaurant_id=eq.${dbId}`
         }, (payload) => {
-          console.log('⚡ Mudança de Pedidos detetada pelo Realtime:', payload.eventType);
           if (payload.eventType === 'INSERT') {
             const newOrder = mapOrder(payload.new);
             localOrders = [newOrder, ...localOrders].slice(0, 200);
@@ -891,145 +833,108 @@ export const supabaseService = {
     };
   },
 
-  async createOrder(restaurantId: string, orderData: Omit<Order, 'id' | 'createdAt'>): Promise<Order> {
+  async createOrder(restaurantId: string, order: Omit<Order, 'id' | 'createdAt'>): Promise<Order> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const tempId = `ord_${Date.now()}`;
+    const newId = crypto.randomUUID();
     const newOrder: Order = {
-      ...orderData,
-      id: tempId,
+      ...order,
+      id: newId,
       createdAt: new Date().toISOString()
     };
 
-    const currentCached = getLocalData(`local_orders_${dbId}`, []);
-    setLocalData(`local_orders_${dbId}`, [newOrder, ...currentCached]);
-    triggerLocalUpdate(`rt-orders-${dbId}`);
+    const localKey = `local_orders_${dbId}`;
+    const current = getLocalData(localKey, []);
+    setLocalData(localKey, [newOrder, ...current]);
 
-    try {
-      if (!isSupabaseHealthy) return newOrder;
+    // Invalidar cache em memória
+    delete memoryCache[`orders_${dbId}`];
 
-      // Sanitizar itens em formato JSON simples para a tabela Postgres
-      const dbItems = orderData.items.map(item => ({
-        productId: item.productId,
-        name: item.name,
-        price: item.price,
-        quantity: item.quantity,
-        notes: item.notes || ''
-      }));
-
-      const { data, error } = await supabase
-        .from('orders')
-        .insert([{
-          restaurant_id: dbId,
-          customer_name: orderData.customerName,
-          table_number: orderData.tableNumber || null,
-          items: dbItems,
-          total: orderData.total,
-          status: orderData.status,
-          payment_method: orderData.paymentMethod,
-          payment_status: orderData.paymentStatus || 'pending',
-          notes: orderData.notes || '',
-          type: orderData.type || 'table',
-          phone: orderData.phone || '',
-          address: orderData.address || ''
-        }])
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      const saved: Order = {
-        id: data.id,
-        customerName: data.customer_name,
-        tableNumber: data.table_number || '',
-        items: (data.items || []).map((x: any) => ({
-          id: Math.random().toString(),
-          productId: x.productId,
-          name: x.name,
-          price: x.price,
-          quantity: x.quantity,
-          notes: x.notes || ''
-        })),
-        total: data.total,
-        status: data.status,
-        paymentMethod: data.payment_method,
-        createdAt: data.created_at,
-        paymentStatus: data.payment_status || 'pending',
-        notes: data.notes || '',
-        type: data.type || 'table',
-        phone: data.phone || '',
-        address: data.address || ''
-      };
-
-      const nonTemp = getLocalData(`local_orders_${dbId}`, []).filter((o: any) => o.id !== tempId);
-      setLocalData(`local_orders_${dbId}`, [saved, ...nonTemp]);
+    if (!isSupabaseHealthy) {
       triggerLocalUpdate(`rt-orders-${dbId}`);
-      return saved;
-    } catch (e) {
-      console.warn('Pedido guardado apenas em sessão local:', e);
       return newOrder;
     }
-  },
-
-  async updateOrderStatus(restaurantId: string, orderId: string, status: Order['status'], paymentStatus?: Order['paymentStatus']) {
-    const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_orders_${dbId}`, []);
-    const updated = currentCached.map((o: any) => {
-      if (o.id === orderId) {
-        return {
-          ...o,
-          status,
-          paymentStatus: paymentStatus !== undefined ? paymentStatus : o.paymentStatus
-        };
-      }
-      return o;
-    });
-    setLocalData(`local_orders_${dbId}`, updated);
-    triggerLocalUpdate(`rt-orders-${dbId}`);
 
     try {
-      if (!isSupabaseHealthy) return;
-
-      const payload: any = { status };
-      if (paymentStatus !== undefined) {
-        payload.payment_status = paymentStatus;
-      }
-
       const { error } = await supabase
         .from('orders')
-        .update(payload)
-        .eq('id', orderId)
-        .eq('restaurant_id', dbId);
+        .insert([{
+          id: newId,
+          restaurant_id: dbId,
+          customer_name: order.customerName,
+          customer_phone: order.customerPhone,
+          items: order.items,
+          total: order.total,
+          type: order.type,
+          status: order.status,
+          table_number: order.tableNumber || null,
+          address: order.address || null,
+          payment_method: order.paymentMethod,
+          change_for: order.changeFor || null
+        }]);
 
       if (error) throw error;
     } catch (e) {
-      console.error('Erro ao atualizar status do pedido no Supabase:', e);
+      console.error('Pedido salvo apenas localmente:', e);
+    }
+
+    return newOrder;
+  },
+
+  async updateOrderStatus(restaurantId: string, orderId: string, status: Order['status']): Promise<void> {
+    const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
+    const localKey = `local_orders_${dbId}`;
+    const current = getLocalData(localKey, []);
+    setLocalData(localKey, current.map((o: any) => o.id === orderId ? { ...o, status } : o));
+
+    // Invalidar cache em memória
+    delete memoryCache[`orders_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-orders-${dbId}`);
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('orders')
+        .update({ status })
+        .eq('id', orderId);
+
+      if (error) throw error;
+    } catch (e) {
+      console.error('Atualizado apenas localmente:', e);
     }
   },
 
   async deleteOrder(restaurantId: string, orderId: string) {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_orders_${dbId}`, []);
-    setLocalData(`local_orders_${dbId}`, currentCached.filter((o: any) => o.id !== orderId));
-    triggerLocalUpdate(`rt-orders-${dbId}`);
+    const localKey = `local_orders_${dbId}`;
+    const current = getLocalData(localKey, []);
+    setLocalData(localKey, current.filter((o: any) => o.id !== orderId));
+
+    // Invalidar cache em memória
+    delete memoryCache[`orders_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-orders-${dbId}`);
+      return 1;
+    }
 
     try {
-      if (!isSupabaseHealthy) return 1;
-
       const { error } = await supabase
         .from('orders')
         .delete({ count: 'exact' })
-        .eq('id', orderId)
-        .eq('restaurant_id', dbId);
+        .eq('id', orderId);
 
       if (error) throw error;
       return 1;
     } catch (e) {
-      console.error('Erro ao excluir no Supabase:', e);
+      console.error('Erro ao excluir pedido:', e);
       return 1;
     }
   },
 
-  // --- SEGMENTO DE MESAS DO GERENCIADOR ---
+  // TABLES
   async getTables(restaurantId: string): Promise<RestaurantTable[]> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
     try {
@@ -1044,108 +949,75 @@ export const supabaseService = {
         .eq('restaurant_id', dbId);
 
       if (error) throw error;
-      
-      const mapped = (data || []).map(t => ({
+      const tables = (data || []).map(t => ({
         id: t.id,
         number: t.number,
-        seats: t.seats || 4,
-        status: t.status || 'available',
-        activeSession: t.active_session || undefined,
-        activeClient: t.active_client || undefined
-      }));
+        qrCodeUrl: t.qr_code_url || ''
+      })).sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true }));
 
-      return mapped.sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true }));
-    } catch (err) {
+      setLocalData(`local_tables_${dbId}`, tables);
+      return tables;
+    } catch {
       const cached = getLocalData(`local_tables_${dbId}`, []) as RestaurantTable[];
       return cached.sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true }));
     }
   },
 
-  async addTable(restaurantId: string, number: string, seats: number = 4): Promise<RestaurantTable> {
+  async addTable(restaurantId: string, tableNumber: string, qrCodeUrl: string): Promise<RestaurantTable> {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const tempId = `tab_${Date.now()}`;
-    const newTable: RestaurantTable = { id: tempId, number, seats, status: 'available' };
+    const newId = crypto.randomUUID();
+    const newTable: RestaurantTable = { id: newId, number: tableNumber, qrCodeUrl };
 
-    const currentCached = getLocalData(`local_tables_${dbId}`, []) as RestaurantTable[];
-    const updated = [...currentCached, newTable];
-    setLocalData(`local_tables_${dbId}`, updated);
-    triggerLocalUpdate(`rt-tables-${dbId}`);
+    const localKey = `local_tables_${dbId}`;
+    const current = getLocalData(localKey, []) as RestaurantTable[];
+    const updated = [...current, newTable].sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true }));
+    setLocalData(localKey, updated);
 
-    try {
-      if (!isSupabaseHealthy) return newTable;
+    // Invalidar cache em memória
+    delete memoryCache[`tables_${dbId}`];
 
-      const { data, error } = await supabase
-        .from('tables')
-        .insert([{
-          restaurant_id: dbId,
-          number: number,
-          seats: seats,
-          status: 'available'
-        }])
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      const saved: RestaurantTable = {
-        id: data.id,
-        number: data.number,
-        seats: data.seats || 4,
-        status: data.status || 'available'
-      };
-
-      const nonTemp = (getLocalData(`local_tables_${dbId}`, []) as RestaurantTable[]).filter(t => t.id !== tempId);
-      setLocalData(`local_tables_${dbId}`, [...nonTemp, saved]);
+    if (!isSupabaseHealthy) {
       triggerLocalUpdate(`rt-tables-${dbId}`);
-      return saved;
-    } catch (e) {
-      console.error('Mesa criada temporariamente local por erro ou offline:', e);
       return newTable;
     }
-  },
-
-  async updateTable(restaurantId: string, table: RestaurantTable) {
-    const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_tables_${dbId}`, []) as RestaurantTable[];
-    const updated = currentCached.map(t => t.id === table.id ? table : t);
-    setLocalData(`local_tables_${dbId}`, updated);
-    triggerLocalUpdate(`rt-tables-${dbId}`);
 
     try {
-      if (!isSupabaseHealthy) return;
-
       const { error } = await supabase
         .from('tables')
-        .update({
-          number: table.number,
-          seats: table.seats,
-          status: table.status,
-          active_session: table.activeSession || null,
-          active_client: table.activeClient || null
-        })
-        .eq('id', table.id)
-        .eq('restaurant_id', dbId);
+        .insert([{
+          id: newId,
+          restaurant_id: dbId,
+          number: tableNumber,
+          qr_code_url: qrCodeUrl
+        }]);
 
       if (error) throw error;
     } catch (error) {
-      console.error('Erro ao atualizar mesa no Supabase:', error);
+      console.error('Mesa adicionada local apenas:', error);
     }
+
+    return newTable;
   },
 
   async deleteTable(restaurantId: string, tableId: string) {
     const dbId = restaurantId === 'default' ? DEFAULT_RESTAURANT_ID : restaurantId;
-    const currentCached = getLocalData(`local_tables_${dbId}`, []) as RestaurantTable[];
-    setLocalData(`local_tables_${dbId}`, currentCached.filter(t => t.id !== tableId));
-    triggerLocalUpdate(`rt-tables-${dbId}`);
+    const localKey = `local_tables_${dbId}`;
+    const current = getLocalData(localKey, []) as RestaurantTable[];
+    setLocalData(localKey, current.filter(t => t.id !== tableId));
+
+    // Invalidar cache em memória
+    delete memoryCache[`tables_${dbId}`];
+
+    if (!isSupabaseHealthy) {
+      triggerLocalUpdate(`rt-tables-${dbId}`);
+      return 1;
+    }
 
     try {
-      if (!isSupabaseHealthy) return 1;
-
       const { error } = await supabase
         .from('tables')
         .delete({ count: 'exact' })
-        .eq('id', tableId)
-        .eq('restaurant_id', dbId);
+        .eq('id', tableId);
 
       if (error) throw error;
       return 1;
@@ -1186,16 +1058,11 @@ export const supabaseService = {
         if (error) throw error;
         
         if (data) {
-          const mappedTables: RestaurantTable[] = data.map(t => ({
+          const mappedTables = data.map(t => ({
             id: t.id,
             number: t.number,
-            seats: t.seats || 4,
-            status: t.status || 'available',
-            activeSession: t.active_session || undefined,
-            activeClient: t.active_client || undefined
-          }));
-
-          mappedTables.sort((a, b) => 
+            qrCodeUrl: t.qr_code_url || ''
+          })).sort((a, b) => 
             a.number.localeCompare(b.number, undefined, { numeric: true })
           );
 
@@ -1206,7 +1073,6 @@ export const supabaseService = {
           callback([]);
         }
       } catch (err) {
-        console.warn('Erro ao restaurar mesas via realtime, usando cópia offline:', err);
         const cached = getLocalData(`local_tables_${dbId}`, []) as RestaurantTable[];
         cached.sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true }));
         memoryCache[cacheKey] = cached;
@@ -1228,7 +1094,7 @@ export const supabaseService = {
     let subscription: any = null;
     try {
       subscription = supabase
-        .channel(`public:tables:restaurant_id=eq.${dbId}`)
+        .channel(`tables-changes-${dbId}`)
         .on('postgres_changes', {
           event: '*',
           schema: 'public',
